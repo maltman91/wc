@@ -254,6 +254,19 @@ XG_OVERRIDES: Dict[str, Tuple[float, float]] = {
 
 APPENDIX_C_SLOT_ORDER = ("M74", "M77", "M79", "M80", "M81", "M82", "M85", "M87")
 
+# FIFA Round-of-32 placeholder constraints for third-place groups.
+# A third-place team can only be assigned to slots where its group letter is allowed.
+SLOT_ALLOWED_GROUPS: Dict[str, set] = {
+    "M74": set("ABCDF"),
+    "M77": set("CDFGH"),
+    "M79": set("CEFHI"),
+    "M80": set("EHIJK"),
+    "M81": set("BEFIJ"),
+    "M82": set("AEHIJ"),
+    "M85": set("EFGIJ"),
+    "M87": set("DEIJL"),
+}
+
 
 def _load_appendix_c_matrix() -> Dict[str, Dict[str, str]]:
     matrix_path = Path(__file__).with_name("appendix_c_matrix.json")
@@ -525,13 +538,49 @@ def _build_group_table_from_stats(stats: np.ndarray, elo_arr: np.ndarray) -> pd.
     return pd.DataFrame(rows)
 
 
+def _assign_third_place_groups(best_third_groups: List[str]) -> Dict[str, str]:
+    qualified_groups = set(best_third_groups)
+
+    candidates = {
+        slot: sorted(list(SLOT_ALLOWED_GROUPS[slot] & qualified_groups))
+        for slot in APPENDIX_C_SLOT_ORDER
+    }
+
+    for slot, cands in candidates.items():
+        if not cands:
+            key = "".join(sorted(best_third_groups))
+            raise RuntimeError(f"No valid third-place group candidate for {slot} with combo {key}")
+
+    slot_order = sorted(APPENDIX_C_SLOT_ORDER, key=lambda s: len(candidates[s]))
+
+    def backtrack(i: int, used: set, assign: Dict[str, str]) -> Optional[Dict[str, str]]:
+        if i == len(slot_order):
+            return assign.copy()
+
+        slot = slot_order[i]
+        for grp in candidates[slot]:
+            if grp in used:
+                continue
+            assign[slot] = grp
+            used.add(grp)
+            res = backtrack(i + 1, used, assign)
+            if res is not None:
+                return res
+            used.remove(grp)
+            del assign[slot]
+
+        return None
+
+    assigned_groups = backtrack(0, set(), {})
+    if assigned_groups is None:
+        key = "".join(sorted(best_third_groups))
+        raise RuntimeError(f"Unable to assign third-place groups for combo {key}")
+    return assigned_groups
+
+
 def _assign_third_place_slots_idx(best_third_groups: List[str], best_third_team_indices: List[int]) -> Dict[str, int]:
     group_to_team_idx = dict(zip(best_third_groups, best_third_team_indices))
-    key = "".join(sorted(best_third_groups))
-    assigned_groups = APPENDIX_C_MATRIX.get(key)
-    if assigned_groups is None:
-        raise RuntimeError(f"No Appendix C mapping for third-place combination: {key}")
-
+    assigned_groups = _assign_third_place_groups(best_third_groups)
     return {slot: group_to_team_idx[assigned_groups[slot]] for slot in APPENDIX_C_SLOT_ORDER}
 
 
@@ -628,11 +677,7 @@ def sort_group(group: str, table: Dict[str, Dict[str, int]], strength: pd.DataFr
 
 def assign_third_place_slots(best_thirds: pd.DataFrame) -> Dict[str, str]:
     group_to_team = {row["Group"]: row["Team"] for _, row in best_thirds.iterrows()}
-    key = "".join(sorted(group_to_team.keys()))
-    assigned_groups = APPENDIX_C_MATRIX.get(key)
-    if assigned_groups is None:
-        raise RuntimeError(f"No Appendix C mapping for third-place combination: {key}")
-
+    assigned_groups = _assign_third_place_groups(list(group_to_team.keys()))
     return {slot: group_to_team[assigned_groups[slot]] for slot in APPENDIX_C_SLOT_ORDER}
 
 
@@ -1705,12 +1750,11 @@ def main() -> None:
         projected_r32, combo_key = build_projected_r32_fixtures(result["sim"]["predicted_group_table"])
         st.caption(
             "Built from predicted group winners/runners-up plus top-8 predicted third-place teams, "
-            f"then mapped through Appendix C combination **{combo_key}**."
+            f"then assigned through FIFA slot constraints for third-place groups (qualified combo **{combo_key}**)."
         )
         st.caption(
-            "Note: Round of 32 matchups can still pair teams from different groups that feel surprising at first glance. "
-            "For example, a Group C third-place Scotland can be assigned to Appendix C slot M80, which is the Group L winner slot. "
-            "That is why England can legitimately appear as a possible R32 opponent in this bracket model."
+            "Note: third-place teams are constrained by FIFA placeholder rules per match slot. "
+            "This means some opponent draws are impossible by design and are now excluded by the assignment logic."
         )
         st.dataframe(projected_r32, use_container_width=True, hide_index=True)
         st.markdown("**Third-place slot explainer**")
