@@ -1371,6 +1371,11 @@ def main() -> None:
             "Built from predicted group winners/runners-up plus top-8 predicted third-place teams, "
             f"then mapped through Appendix C combination **{combo_key}**."
         )
+        st.caption(
+            "Note: Round of 32 matchups can still pair teams from different groups that feel surprising at first glance. "
+            "For example, a Group C third-place Scotland can be assigned to Appendix C slot M80, which is the Group L winner slot. "
+            "That is why England can legitimately appear as a possible R32 opponent in this bracket model."
+        )
         st.dataframe(projected_r32, use_container_width=True, hide_index=True)
 
         st.markdown("---")
@@ -1512,6 +1517,10 @@ def main() -> None:
 
         st.markdown("---")
         st.subheader("Most likely opponents by stage")
+        st.caption(
+            "These are stage-specific opponents from the simulation tree. The Round of 32 row only counts actual R32 pairings; "
+            "later rounds are reported separately, so this table should not be read as a generic 'any time in the tournament' list."
+        )
         opponents_df = build_team_stage_opponents(result["sim"]["stage_path_counters"], selected_team)
         st.dataframe(opponents_df, use_container_width=True, hide_index=True)
 
