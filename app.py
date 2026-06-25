@@ -1080,6 +1080,57 @@ def build_projected_r32_fixtures(predicted_df: pd.DataFrame) -> Tuple[pd.DataFra
     return pd.DataFrame(fixture_rows), combo_key
 
 
+def build_third_place_slot_explainer(predicted_df: pd.DataFrame) -> pd.DataFrame:
+    thirds = predicted_df[predicted_df["Pos"] == 3][
+        ["Group", "Team", "Pred Pts", "Pred GD", "Pred GF"]
+    ].copy()
+    thirds = thirds.sort_values(
+        ["Pred Pts", "Pred GD", "Pred GF", "Group"],
+        ascending=[False, False, False, True],
+    ).reset_index(drop=True)
+    best_thirds = thirds.head(8)
+
+    third_slots = assign_third_place_slots(best_thirds)
+    slot_targets = {
+        "M74": ("E", "Winner of Group E"),
+        "M77": ("I", "Winner of Group I"),
+        "M79": ("A", "Winner of Group A"),
+        "M80": ("L", "Winner of Group L"),
+        "M81": ("D", "Winner of Group D"),
+        "M82": ("G", "Winner of Group G"),
+        "M85": ("B", "Winner of Group B"),
+        "M87": ("K", "Winner of Group K"),
+    }
+
+    rows = []
+    for slot in APPENDIX_C_SLOT_ORDER:
+        target_group, target_label = slot_targets[slot]
+        third_group = None
+        third_team = None
+        for _, row in best_thirds.iterrows():
+            if row["Team"] == third_slots[slot]:
+                third_group = row["Group"]
+                third_team = row["Team"]
+                break
+        rows.append(
+            {
+                "Slot": slot,
+                "Third-place team": third_team,
+                "Third-place group": third_group,
+                "R32 opponent slot": target_label,
+                "Opposition group": target_group,
+                "Why it matters": (
+                    f"{third_team} lands in {slot} and plays {target_label}; "
+                    f"if {target_group} is won by England, Scotland can meet England here."
+                    if third_team == "Scotland" and target_group == "L"
+                    else f"{slot} feeds the {target_label} bracket slot."
+                ),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def _estimate_knockout_win_probability(
     team_a: str,
     team_b: str,
@@ -1377,6 +1428,16 @@ def main() -> None:
             "That is why England can legitimately appear as a possible R32 opponent in this bracket model."
         )
         st.dataframe(projected_r32, use_container_width=True, hide_index=True)
+        st.markdown("**Third-place slot explainer**")
+        st.caption(
+            "This table shows which third-place group is assigned to each Appendix C slot for the current simulation, "
+            "and which group-winner slot that third-place team feeds into."
+        )
+        st.dataframe(
+            build_third_place_slot_explainer(result["sim"]["predicted_group_table"]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
         st.markdown("---")
         st.subheader("Projected path to the Final")
