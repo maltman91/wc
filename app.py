@@ -976,6 +976,290 @@ def build_team_stage_opponents(
     return pd.DataFrame(rows)
 
 
+@st.cache_data(show_spinner=False)
+def simulate_conditioned_team_paths(
+    locked_matches: List[Tuple[str, str, str, int, int]],
+    selected_team: str,
+    target_samples: int,
+    route_filter: str,
+    seed: int,
+) -> Dict:
+    rng = np.random.default_rng(seed)
+    strength = build_strength_table()
+    lam_home, lam_away, elo_arr = _precompute_goal_rate_matrices(strength)
+
+    locked_lookup_idx = {
+        (g, TEAM_INDEX[h], TEAM_INDEX[a]): (gh, ga) for g, h, a, gh, ga in locked_matches
+    }
+
+    selected_idx = TEAM_INDEX[selected_team]
+    qualified_samples = 0
+    attempts = 0
+    max_attempts = max(20000, target_samples * 250)
+
+    route_counts: Counter = Counter()
+    elimination_counts: Counter = Counter()
+    stage_reach_counts: Counter = Counter()
+    stage_opponents: Dict[str, Counter] = {
+        "Round of 32": Counter(),
+        "Round of 16": Counter(),
+        "Quarter-finals": Counter(),
+        "Semi-finals": Counter(),
+        "Final": Counter(),
+    }
+    titles = 0
+
+    stage_filter_map = {
+        "Any qualifying route": "Any qualifying route",
+        "Group winner": "Group winner",
+        "Group runner-up": "Group runner-up",
+        "Best third": "Best third",
+    }
+    desired_route = stage_filter_map.get(route_filter, "Any qualifying route")
+
+    while qualified_samples < target_samples and attempts < max_attempts:
+        attempts += 1
+        stats = np.zeros((len(ALL_TEAMS), 7), dtype=np.int16)
+
+        winners_idx: Dict[str, int] = {}
+        runners_idx: Dict[str, int] = {}
+        third_rows: List[Tuple[str, int, int, int, int]] = []
+
+        for group in GROUP_ORDER:
+            for home_idx, away_idx in GROUP_FIXTURE_INDICES[group]:
+                key = (group, home_idx, away_idx)
+                if key in locked_lookup_idx:
+                    gh, ga = locked_lookup_idx[key]
+                else:
+                    gh = int(rng.poisson(lam_home[home_idx, away_idx]))
+                    ga = int(rng.poisson(lam_away[home_idx, away_idx]))
+                _apply_result_array(stats, home_idx, away_idx, gh, ga)
+
+            sorted_group = _sorted_group_indices(stats, GROUP_TEAM_INDICES[group], elo_arr)
+            winners_idx[group] = int(sorted_group[0])
+            runners_idx[group] = int(sorted_group[1])
+            third_idx = int(sorted_group[2])
+            third_rows.append(
+                (
+                    group,
+                    third_idx,
+                    int(stats[third_idx, STAT_PTS]),
+                    int(stats[third_idx, STAT_GF] - stats[third_idx, STAT_GA]),
+                    int(stats[third_idx, STAT_GF]),
+                )
+            )
+
+        third_rows_sorted = sorted(third_rows, key=lambda x: (x[2], x[3], x[4]), reverse=True)
+        best_thirds = third_rows_sorted[:8]
+        best_third_groups = [row[0] for row in best_thirds]
+        best_third_indices = [row[1] for row in best_thirds]
+
+        route = None
+        if selected_idx in winners_idx.values():
+            route = "Group winner"
+        elif selected_idx in runners_idx.values():
+            route = "Group runner-up"
+        elif selected_idx in best_third_indices:
+            route = "Best third"
+        else:
+            continue
+
+        if desired_route != "Any qualifying route" and route != desired_route:
+            continue
+
+        qualified_samples += 1
+        route_counts[route] += 1
+
+        third_slots_idx = _assign_third_place_slots_idx(best_third_groups, best_third_indices)
+        r32 = {
+            73: (runners_idx["A"], runners_idx["B"]),
+            74: (winners_idx["E"], third_slots_idx["M74"]),
+            75: (winners_idx["F"], runners_idx["C"]),
+            76: (winners_idx["C"], runners_idx["F"]),
+            77: (winners_idx["I"], third_slots_idx["M77"]),
+            78: (runners_idx["E"], runners_idx["I"]),
+            79: (winners_idx["A"], third_slots_idx["M79"]),
+            80: (winners_idx["L"], third_slots_idx["M80"]),
+            81: (winners_idx["D"], third_slots_idx["M81"]),
+            82: (winners_idx["G"], third_slots_idx["M82"]),
+            83: (runners_idx["K"], runners_idx["L"]),
+            84: (winners_idx["H"], runners_idx["J"]),
+            85: (winners_idx["B"], third_slots_idx["M85"]),
+            86: (winners_idx["J"], runners_idx["H"]),
+            87: (winners_idx["K"], third_slots_idx["M87"]),
+            88: (runners_idx["D"], runners_idx["G"]),
+        }
+
+        stage_order = [
+            ("Round of 32", r32, range(73, 89)),
+            ("Round of 16", None, range(89, 97)),
+            ("Quarter-finals", None, range(97, 101)),
+            ("Semi-finals", None, range(101, 103)),
+            ("Final", None, [104]),
+        ]
+
+        winners_by_match: Dict[int, int] = {}
+
+        def _simulate_stage(fixtures: Dict[int, Tuple[int, int]], mids: List[int]) -> Dict[int, Tuple[int, int]]:
+            for mid in mids:
+                t1, t2 = fixtures[mid]
+                winners_by_match[mid] = _knockout_match_idx(t1, t2, lam_home, lam_away, elo_arr, rng)
+            return fixtures
+
+        def _selected_fixture(fixtures: Dict[int, Tuple[int, int]]) -> Optional[Tuple[int, int, int]]:
+            for mid, (t1, t2) in fixtures.items():
+                if t1 == selected_idx:
+                    return mid, t1, t2
+                if t2 == selected_idx:
+                    return mid, t2, t1
+            return None
+
+        r32_used = _simulate_stage(r32, list(range(73, 89)))
+        info = _selected_fixture(r32_used)
+        if info is None:
+            continue
+        mid, _self_idx, opp_idx = info
+        stage_reach_counts["Round of 32"] += 1
+        stage_opponents["Round of 32"][opp_idx] += 1
+        if winners_by_match[mid] != selected_idx:
+            elimination_counts["Round of 32"] += 1
+            continue
+
+        r16 = {
+            89: (winners_by_match[74], winners_by_match[77]),
+            90: (winners_by_match[73], winners_by_match[75]),
+            91: (winners_by_match[76], winners_by_match[78]),
+            92: (winners_by_match[79], winners_by_match[80]),
+            93: (winners_by_match[83], winners_by_match[84]),
+            94: (winners_by_match[81], winners_by_match[82]),
+            95: (winners_by_match[86], winners_by_match[88]),
+            96: (winners_by_match[85], winners_by_match[87]),
+        }
+        r16_used = _simulate_stage(r16, list(range(89, 97)))
+        info = _selected_fixture(r16_used)
+        if info is None:
+            continue
+        mid, _self_idx, opp_idx = info
+        stage_reach_counts["Round of 16"] += 1
+        stage_opponents["Round of 16"][opp_idx] += 1
+        if winners_by_match[mid] != selected_idx:
+            elimination_counts["Round of 16"] += 1
+            continue
+
+        qf = {
+            97: (winners_by_match[89], winners_by_match[90]),
+            98: (winners_by_match[93], winners_by_match[94]),
+            99: (winners_by_match[91], winners_by_match[92]),
+            100: (winners_by_match[95], winners_by_match[96]),
+        }
+        qf_used = _simulate_stage(qf, list(range(97, 101)))
+        info = _selected_fixture(qf_used)
+        if info is None:
+            continue
+        mid, _self_idx, opp_idx = info
+        stage_reach_counts["Quarter-finals"] += 1
+        stage_opponents["Quarter-finals"][opp_idx] += 1
+        if winners_by_match[mid] != selected_idx:
+            elimination_counts["Quarter-finals"] += 1
+            continue
+
+        sf = {
+            101: (winners_by_match[97], winners_by_match[98]),
+            102: (winners_by_match[99], winners_by_match[100]),
+        }
+        sf_used = _simulate_stage(sf, list(range(101, 103)))
+        info = _selected_fixture(sf_used)
+        if info is None:
+            continue
+        mid, _self_idx, opp_idx = info
+        stage_reach_counts["Semi-finals"] += 1
+        stage_opponents["Semi-finals"][opp_idx] += 1
+        if winners_by_match[mid] != selected_idx:
+            elimination_counts["Semi-finals"] += 1
+            continue
+
+        final_fx = {104: (winners_by_match[101], winners_by_match[102])}
+        _simulate_stage(final_fx, [104])
+        info = _selected_fixture(final_fx)
+        if info is None:
+            continue
+        _mid, _self_idx, opp_idx = info
+        stage_reach_counts["Final"] += 1
+        stage_opponents["Final"][opp_idx] += 1
+        if winners_by_match[104] == selected_idx:
+            titles += 1
+        else:
+            elimination_counts["Final"] += 1
+
+    if qualified_samples == 0:
+        return {
+            "qualified_samples": 0,
+            "attempts": attempts,
+            "route_breakdown": pd.DataFrame(),
+            "opponents_by_stage": pd.DataFrame(),
+            "elimination_breakdown": pd.DataFrame(),
+            "titles": 0,
+        }
+
+    route_rows = []
+    for route_name in ["Group winner", "Group runner-up", "Best third"]:
+        count = int(route_counts.get(route_name, 0))
+        route_rows.append(
+            {
+                "Qualification route": route_name,
+                "Samples": count,
+                "Share %": round(100.0 * count / qualified_samples, 2),
+            }
+        )
+
+    stage_rows = []
+    stage_labels = ["Round of 32", "Round of 16", "Quarter-finals", "Semi-finals", "Final"]
+    for stage in stage_labels:
+        reached = int(stage_reach_counts.get(stage, 0))
+        top = stage_opponents[stage].most_common(3)
+        if top and reached > 0:
+            opp_text = ", ".join(
+                [f"{ALL_TEAMS[idx]} ({100.0 * c / reached:.1f}%)" for idx, c in top]
+            )
+        else:
+            opp_text = "No samples"
+        stage_rows.append(
+            {
+                "Stage": stage,
+                "Reached samples": reached,
+                "Top opponents (conditional on reaching stage)": opp_text,
+            }
+        )
+
+    elimination_rows = []
+    for stage in ["Round of 32", "Round of 16", "Quarter-finals", "Semi-finals", "Final"]:
+        count = int(elimination_counts.get(stage, 0))
+        elimination_rows.append(
+            {
+                "Eliminated at": stage,
+                "Samples": count,
+                "Share of qualified samples %": round(100.0 * count / qualified_samples, 2),
+            }
+        )
+
+    elimination_rows.append(
+        {
+            "Eliminated at": "Won Tournament",
+            "Samples": int(titles),
+            "Share of qualified samples %": round(100.0 * titles / qualified_samples, 2),
+        }
+    )
+
+    return {
+        "qualified_samples": qualified_samples,
+        "attempts": attempts,
+        "route_breakdown": pd.DataFrame(route_rows),
+        "opponents_by_stage": pd.DataFrame(stage_rows),
+        "elimination_breakdown": pd.DataFrame(elimination_rows),
+        "titles": int(titles),
+    }
+
+
 def render_group_tables(table_df: pd.DataFrame) -> None:
     cols = ["Group", "Pos", "Team", "Pts", "GD", "GF", "GA", "W", "D", "L", "P"]
     for group in GROUPS:
@@ -1366,6 +1650,7 @@ def main() -> None:
             "live_df": live_df,
             "warnings": warnings,
             "espn_completed_count": len(espn_completed),
+            "locked_rows": locked_rows,
             "locked_group_table": live_table,
             "sim": sim,
         }
@@ -1584,6 +1869,72 @@ def main() -> None:
         )
         opponents_df = build_team_stage_opponents(result["sim"]["stage_path_counters"], selected_team)
         st.dataframe(opponents_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("Conditioned deep-path explorer")
+        st.caption(
+            "For low-probability teams, this tool samples only tournaments where the selected team actually qualifies, "
+            "so you can inspect realistic knockout routes without being drowned out by non-qualification runs."
+        )
+
+        route_filter = st.selectbox(
+            "Qualification route filter",
+            ["Any qualifying route", "Group winner", "Group runner-up", "Best third"],
+            index=0,
+            key="conditioned_route_filter",
+        )
+        conditioned_samples = st.slider(
+            "Qualified path samples to collect",
+            min_value=200,
+            max_value=4000,
+            value=1200,
+            step=200,
+            key="conditioned_samples_slider",
+        )
+
+        run_conditioned = st.button(
+            "Run conditioned path explorer",
+            use_container_width=True,
+            key="run_conditioned_explorer",
+        )
+
+        if run_conditioned:
+            with st.spinner("Running conditioned team path simulations..."):
+                conditioned = simulate_conditioned_team_paths(
+                    result.get("locked_rows", []),
+                    selected_team,
+                    int(conditioned_samples),
+                    route_filter,
+                    20260625,
+                )
+            st.session_state["conditioned_path_result"] = {
+                "team": selected_team,
+                "route_filter": route_filter,
+                "samples": int(conditioned_samples),
+                "data": conditioned,
+            }
+
+        conditioned_result = st.session_state.get("conditioned_path_result")
+        if conditioned_result and conditioned_result.get("team") == selected_team:
+            data = conditioned_result["data"]
+            qs = int(data.get("qualified_samples", 0))
+            attempts = int(data.get("attempts", 0))
+            if qs == 0:
+                st.warning(
+                    "No qualified samples were found for this setup yet. Increase samples or use 'Any qualifying route'."
+                )
+            else:
+                accept_rate = 100.0 * qs / max(1, attempts)
+                st.caption(
+                    f"Collected {qs} qualified paths from {attempts} total tournament simulations "
+                    f"({accept_rate:.2f}% acceptance rate)."
+                )
+                st.markdown("**Qualification route mix (within qualified samples)**")
+                st.dataframe(data["route_breakdown"], use_container_width=True, hide_index=True)
+                st.markdown("**Top opponents by stage (conditioned)**")
+                st.dataframe(data["opponents_by_stage"], use_container_width=True, hide_index=True)
+                st.markdown("**Elimination distribution (conditioned)**")
+                st.dataframe(data["elimination_breakdown"], use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
