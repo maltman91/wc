@@ -1411,14 +1411,7 @@ def main() -> None:
             "Win Tournament %",
         ]
 
-        styled = probs[display_cols].style.background_gradient(
-            cmap="YlGn",
-            subset=[
-                "Advance to R32 %", "Reach Round of 16 %", "Reach Quarter-finals %",
-                "Reach Semi-finals %", "Reach Final %", "Win Tournament %",
-            ],
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(probs[display_cols], use_container_width=True, hide_index=True)
 
         st.subheader(f"{selected_team}: exact probabilistic path")
         if selected_team in team_probs.index:
